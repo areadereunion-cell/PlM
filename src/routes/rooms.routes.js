@@ -802,7 +802,28 @@ const majorityReached =
 // ============================================================
 // CREAR SALA
 // ============================================================
+router.get('/rooms', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT *
+      FROM rooms
+      ORDER BY id DESC
+    `);
 
+    res.status(200).json({
+      success: true,
+      rooms: result.rows,
+    });
+  } catch (error) {
+    console.error('ERROR AL OBTENER SALAS:', error);
+
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener las salas.',
+      error: error.message,
+    });
+  }
+});
 router.post(
   '/rooms',
   async (req, res) => {
