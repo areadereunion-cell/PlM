@@ -1547,7 +1547,6 @@ router.post(
 // ============================================================
 // SIGUIENTE RONDA
 // ============================================================
-
 router.post('/rooms/next-round', async (req, res) => {
   const { room_code, player_id } = req.body;
 
@@ -1571,7 +1570,7 @@ router.post('/rooms/next-round', async (req, res) => {
   }
 
   // =========================================================
-  // VALIDAR QUE EL JUGADOR PERTENECE A LA SALA
+  // VALIDAR JUGADOR
   // =========================================================
 
   const playerResult = await pool.query(
@@ -1607,7 +1606,7 @@ router.post('/rooms/next-round', async (req, res) => {
   }
 
   // =========================================================
-  // VALIDAR QUE EL CONTADOR YA TERMINÓ
+  // VALIDAR CONTADOR
   // =========================================================
 
   const timer = getRoundCountdown(
@@ -1623,17 +1622,15 @@ router.post('/rooms/next-round', async (req, res) => {
     });
   }
 
-  // =========================================================
-  // TRANSACCIÓN
-  // =========================================================
-
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // Bloqueamos la sala para evitar que dos jugadores
-    // cambien de ronda al mismo tiempo.
+    // =======================================================
+    // BLOQUEAR SALA
+    // =======================================================
+
     const lockedRoomResult = await client.query(
       `
         SELECT *
@@ -1662,7 +1659,7 @@ router.post('/rooms/next-round', async (req, res) => {
       Number(lockedRoom.rounds) || 1;
 
     // =======================================================
-    // ¿YA ES LA ÚLTIMA RONDA?
+    // ÚLTIMA RONDA
     // =======================================================
 
     if (currentRound >= totalRounds) {
@@ -1685,7 +1682,7 @@ router.post('/rooms/next-round', async (req, res) => {
         FROM room_players
         WHERE room_id = $1
       `,
-      [room.id]
+      [lockedRoom.id]
     );
 
     const totalPlayers = playersResult.rows.length;
@@ -1713,7 +1710,7 @@ router.post('/rooms/next-round', async (req, res) => {
         DO NOTHING
       `,
       [
-        room.id,
+        lockedRoom.id,
         currentRound,
         cleanPlayerId,
       ]
@@ -1731,7 +1728,7 @@ router.post('/rooms/next-round', async (req, res) => {
           AND round_number = $2
       `,
       [
-        room.id,
+        lockedRoom.id,
         currentRound,
       ]
     );
@@ -1740,7 +1737,7 @@ router.post('/rooms/next-round', async (req, res) => {
       Number(readyResult.rows[0].ready_count) || 0;
 
     // =======================================================
-    // TODAVÍA NO LLEGA AL 50%
+    // TODAVÍA NO ESTÁN LISTOS
     // =======================================================
 
     if (readyCount < requiredPlayers) {
@@ -1753,23 +1750,115 @@ router.post('/rooms/next-round', async (req, res) => {
         total_players: totalPlayers,
         required_players: requiredPlayers,
         current_round: currentRound,
+        current_letter: lockedRoom.current_letter,
         room: lockedRoom,
       });
     }
 
     // =======================================================
-    // YA LLEGÓ AL 50%
+    // LETRAS UTILIZADAS
     // =======================================================
 
-    const usedLetters =
-      normalizeUsedLetters(
-        lockedRoom.used_letters
+    let usedLetters = [];
+
+    try {
+      if (Array.isArray(lockedRoom.used_letters)) {
+        usedLetters = lockedRoom.used_letters;
+      } else if (typeof lockedRoom.used_letters === 'string') {
+        const parsed = JSON.parse(lockedRoom.used_letters);
+
+        if (Array.isArray(parsed)) {
+          usedLetters = parsed;
+        }
+      }
+    } catch (e) {
+      console.error(
+        'Error leyendo used_letters:',
+        e
       );
 
-    const nextLetter =
-      chooseNextLetter(usedLetters);
+      usedLetters = [];
+    }
 
-    if (!nextLetter) {
+    // Normalizar y eliminar duplicados
+    usedLetters = [
+      ...new Set(
+        usedLetters
+          .map(letter =>
+            letter
+              ?.toString()
+              .trim()
+              .toUpperCase()
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+    // =======================================================
+    // ASEGURAR QUE LA LETRA ACTUAL ESTÉ REGISTRADA
+    // =======================================================
+
+    const currentLetter =
+      lockedRoom.current_letter
+        ?.toString()
+        .trim()
+        .toUpperCase();
+
+    if (
+      currentLetter &&
+      !usedLetters.includes(currentLetter)
+    ) {
+      usedLetters.push(currentLetter);
+    }
+
+    // =======================================================
+    // TODAS LAS LETRAS DISPONIBLES
+    // =======================================================
+
+    const allLetters = [
+      'A',
+      'B',
+      'C',
+      'D',
+      'E',
+      'F',
+      'G',
+      'H',
+      'I',
+      'J',
+      'K',
+      'L',
+      'M',
+      'N',
+      'Ñ',
+      'O',
+      'P',
+      'Q',
+      'R',
+      'S',
+      'T',
+      'U',
+      'V',
+      'W',
+      'X',
+      'Y',
+      'Z',
+    ];
+
+    // =======================================================
+    // FILTRAR LETRAS YA UTILIZADAS
+    // =======================================================
+
+    const availableLetters =
+      allLetters.filter(
+        letter => !usedLetters.includes(letter)
+      );
+
+    // =======================================================
+    // NO QUEDAN LETRAS
+    // =======================================================
+
+    if (availableLetters.length === 0) {
       await client.query('ROLLBACK');
 
       return res.status(400).json({
@@ -1777,6 +1866,31 @@ router.post('/rooms/next-round', async (req, res) => {
         message: 'No quedan letras disponibles.',
       });
     }
+
+    // =======================================================
+    // ELEGIR UNA LETRA NUEVA
+    // =======================================================
+
+    const randomIndex =
+      Math.floor(
+        Math.random() * availableLetters.length
+      );
+
+    const nextLetter =
+      availableLetters[randomIndex];
+
+    // =======================================================
+    // NUEVO HISTORIAL
+    // =======================================================
+
+    const newUsedLetters = [
+      ...usedLetters,
+      nextLetter,
+    ];
+
+    // =======================================================
+    // NUEVA RONDA
+    // =======================================================
 
     const nextRound =
       currentRound + 1;
@@ -1799,19 +1913,18 @@ router.post('/rooms/next-round', async (req, res) => {
       [
         nextRound,
         nextLetter,
-        JSON.stringify([
-          ...usedLetters,
-          nextLetter,
-        ]),
-        room.id,
+        JSON.stringify(newUsedLetters),
+        lockedRoom.id,
       ]
     );
 
     const updatedRoom =
       updatedResult.rows[0];
 
-    // Ya no necesitamos los votos de "listos"
-    // de la ronda anterior.
+    // =======================================================
+    // ELIMINAR READY DE LA RONDA ANTERIOR
+    // =======================================================
+
     await client.query(
       `
         DELETE FROM room_round_ready
@@ -1819,12 +1932,16 @@ router.post('/rooms/next-round', async (req, res) => {
           AND round_number = $2
       `,
       [
-        room.id,
+        lockedRoom.id,
         currentRound,
       ]
     );
 
     await client.query('COMMIT');
+
+    // =======================================================
+    // RESPUESTA
+    // =======================================================
 
     return res.status(200).json({
       success: true,
@@ -1836,6 +1953,8 @@ router.post('/rooms/next-round', async (req, res) => {
 
       current_round: nextRound,
       current_letter: nextLetter,
+
+      used_letters: newUsedLetters,
 
       countdown: 0,
       locked: false,
@@ -2483,12 +2602,14 @@ router.post(
         req.body.player_id;
 
       const roundNumber =
-        Number(
-          req.body.round
-        );
+        Number(req.body.round);
 
       const votes =
         req.body.votes;
+
+      // ========================================================
+      // VALIDACIONES BÁSICAS
+      // ========================================================
 
       if (
         !roomCode ||
@@ -2513,9 +2634,7 @@ router.post(
       }
 
       if (
-        !Number.isInteger(
-          roundNumber
-        ) ||
+        !Number.isInteger(roundNumber) ||
         roundNumber <= 0
       ) {
         return res.status(400).json({
@@ -2544,10 +2663,12 @@ router.post(
           .toString()
           .trim();
 
+      // ========================================================
+      // BUSCAR SALA
+      // ========================================================
+
       const room =
-        await getRoomByCode(
-          code
-        );
+        await getRoomByCode(code);
 
       if (!room) {
         return res.status(404).json({
@@ -2557,15 +2678,14 @@ router.post(
         });
       }
 
-      const serverRound =
-        Number(
-          room.current_round || 1
-        );
+      // ========================================================
+      // VALIDAR RONDA
+      // ========================================================
 
-      if (
-        roundNumber !==
-        serverRound
-      ) {
+      const serverRound =
+        Number(room.current_round || 1);
+
+      if (roundNumber !== serverRound) {
         return res.status(409).json({
           success: false,
           message:
@@ -2575,9 +2695,9 @@ router.post(
         });
       }
 
-      // --------------------------------------------------------
-      // JUGADOR
-      // --------------------------------------------------------
+      // ========================================================
+      // VALIDAR VOTANTE
+      // ========================================================
 
       const playerResult =
         await pool.query(
@@ -2589,7 +2709,7 @@ router.post(
             player_name
           FROM room_players
           WHERE room_id = $1
-            AND player_id = $2
+            AND TRIM(player_id) = $2
           LIMIT 1
           `,
           [
@@ -2598,9 +2718,7 @@ router.post(
           ]
         );
 
-      if (
-        playerResult.rows.length === 0
-      ) {
+      if (playerResult.rows.length === 0) {
         return res.status(403).json({
           success: false,
           message:
@@ -2608,11 +2726,9 @@ router.post(
         });
       }
 
-      // --------------------------------------------------------
+      // ========================================================
       // ESTADO ACTUAL
-      //
-      // Permite detectar si ya expiró el timer.
-      // --------------------------------------------------------
+      // ========================================================
 
       const beforeVoting =
         await getVotingState(
@@ -2631,7 +2747,7 @@ router.post(
             FROM room_round_votes
             WHERE room_id = $1
               AND round_number = $2
-              AND voter_player_id = $3
+              AND TRIM(voter_player_id) = $3
             LIMIT 1
             `,
             [
@@ -2641,9 +2757,7 @@ router.post(
             ]
           );
 
-        if (
-          existingVote.rows.length === 0
-        ) {
+        if (existingVote.rows.length === 0) {
           return res.status(409).json({
             success: false,
             message:
@@ -2656,16 +2770,41 @@ router.post(
         }
       }
 
-      // --------------------------------------------------------
+      // ========================================================
+      // OBTENER JUGADORES VÁLIDOS DE LA SALA
+      // ========================================================
+
+      const playersResult =
+        await pool.query(
+          `
+          SELECT
+            player_id
+          FROM room_players
+          WHERE room_id = $1
+          `,
+          [room.id]
+        );
+
+      const validPlayerIds =
+        new Set(
+          playersResult.rows
+            .map(
+              player =>
+                player.player_id
+                  ?.toString()
+                  .trim()
+            )
+            .filter(Boolean)
+        );
+
+      // ========================================================
       // NORMALIZAR VOTOS
-      // --------------------------------------------------------
+      // ========================================================
 
       const normalizedVotes = {};
 
-      for (
-        const vote
-        of votes
-      ) {
+      for (const vote of votes) {
+
         if (
           !vote ||
           !vote.player_id ||
@@ -2691,30 +2830,61 @@ router.post(
             .trim()
             .toLowerCase();
 
+        // ------------------------------------------------------
+        // CALIFICACIÓN VÁLIDA
+        // ------------------------------------------------------
+
         if (
           ![
             'correcta',
             'repetida',
             'mal'
-          ].includes(
-            qualification
-          )
+          ].includes(qualification)
         ) {
           continue;
         }
+
+        // ------------------------------------------------------
+        // EL JUGADOR NO EXISTE EN LA SALA
+        // ------------------------------------------------------
+
+        if (!validPlayerIds.has(targetPlayerId)) {
+          continue;
+        }
+
+        // ------------------------------------------------------
+        // EVITAR AUTO-VOTO
+        // ------------------------------------------------------
+
+        if (
+          targetPlayerId === cleanVoterId
+        ) {
+          continue;
+        }
+
+        // ------------------------------------------------------
+        // EVITAR PREGUNTAS VACÍAS
+        // ------------------------------------------------------
+
+        if (!question) {
+          continue;
+        }
+
+        // ------------------------------------------------------
+        // GUARDAR VOTO
+        // ------------------------------------------------------
 
         normalizedVotes[
           makeVoteKey(
             targetPlayerId,
             question
           )
-        ] =
-          qualification;
+        ] = qualification;
       }
 
-      // --------------------------------------------------------
+      // ========================================================
       // GUARDAR UNA SOLA FILA POR VOTANTE
-      // --------------------------------------------------------
+      // ========================================================
 
       const saveResult =
         await pool.query(
@@ -2764,17 +2934,19 @@ router.post(
       const saved =
         saveResult.rows[0];
 
-      // --------------------------------------------------------
+      // ========================================================
       // RECALCULAR ESTADO
-      //
-      // AQUÍ ES DONDE SE ACTIVA EL TIMER.
-      // --------------------------------------------------------
+      // ========================================================
 
       const voting =
         await getVotingState(
           room.id,
           roundNumber
         );
+
+      // ========================================================
+      // LOG
+      // ========================================================
 
       console.log('');
       console.log(
@@ -2799,7 +2971,7 @@ router.post(
         cleanVoterId
       );
       console.log(
-        'VOTOS:',
+        'VOTOS VÁLIDOS:',
         Object.keys(
           normalizedVotes
         ).length
@@ -2826,6 +2998,10 @@ router.post(
         '================================'
       );
       console.log('');
+
+      // ========================================================
+      // RESPUESTA
+      // ========================================================
 
       return res.status(200).json({
         success: true,
@@ -2873,6 +3049,7 @@ router.post(
       });
 
     } catch (error) {
+
       console.error(
         'ERROR GUARDANDO VOTACIÓN:',
         error
@@ -2882,289 +3059,6 @@ router.post(
         success: false,
         message:
           'Error al guardar la votación.',
-        error:
-          error.message
-      });
-    }
-  }
-);
-router.get(
-  '/rooms/voting/results',
-  async (req, res) => {
-    try {
-      await ensureVotingTable();
-
-      const roomCode =
-        req.query.room_code;
-
-      const roundNumber =
-        Number(
-          req.query.round
-        );
-
-      // --------------------------------------------------------
-      // VALIDACIONES
-      // --------------------------------------------------------
-
-      if (
-        !roomCode ||
-        roomCode.toString().trim() === ''
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            'room_code es obligatorio.'
-        });
-      }
-
-      if (
-        !Number.isInteger(
-          roundNumber
-        ) ||
-        roundNumber <= 0
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            'La ronda no es válida.'
-        });
-      }
-
-      const code =
-        roomCode
-          .toString()
-          .trim()
-          .toUpperCase();
-
-      // --------------------------------------------------------
-      // BUSCAR SALA
-      // --------------------------------------------------------
-
-      const room =
-        await getRoomByCode(
-          code
-        );
-
-      if (!room) {
-        return res.status(404).json({
-          success: false,
-          message:
-            'Sala no encontrada.'
-        });
-      }
-
-      // --------------------------------------------------------
-      // OBTENER TODOS LOS VOTOS
-      //
-      // IMPORTANTE:
-      // NO filtramos por voter_player_id.
-      //
-      // Traemos los votos de TODOS los jugadores.
-      // --------------------------------------------------------
-
-      const votesResult =
-        await pool.query(
-          `
-          SELECT
-            voter_player_id,
-            votes,
-            completed_at
-          FROM room_round_votes
-          WHERE room_id = $1
-            AND round_number = $2
-          ORDER BY completed_at ASC
-          `,
-          [
-            room.id,
-            roundNumber
-          ]
-        );
-
-      // --------------------------------------------------------
-      // CONVERTIR JSONB A VOTOS INDIVIDUALES
-      // --------------------------------------------------------
-
-      const allVotes = [];
-
-      for (
-        const row
-        of votesResult.rows
-      ) {
-        const voterPlayerId =
-          row.voter_player_id
-            ?.toString()
-            .trim() ?? '';
-
-        let votesData =
-          row.votes;
-
-        // Por seguridad si llega como string
-        if (
-          typeof votesData === 'string'
-        ) {
-          try {
-            votesData =
-              JSON.parse(
-                votesData
-              );
-          } catch (_) {
-            votesData = {};
-          }
-        }
-
-        if (
-          !votesData ||
-          typeof votesData !== 'object'
-        ) {
-          continue;
-        }
-
-        // ------------------------------------------------------
-        // FORMATO DE LA KEY:
-        //
-        // targetPlayerId|||question
-        // ------------------------------------------------------
-
-        for (
-          const [
-            voteKey,
-            qualification
-          ]
-          of Object.entries(
-            votesData
-          )
-        ) {
-          const separator =
-            '|||';
-
-          const separatorIndex =
-            voteKey.indexOf(
-              separator
-            );
-
-          if (
-            separatorIndex === -1
-          ) {
-            continue;
-          }
-
-          const targetPlayerId =
-            voteKey
-              .substring(
-                0,
-                separatorIndex
-              )
-              .trim();
-
-          const question =
-            voteKey
-              .substring(
-                separatorIndex +
-                  separator.length
-              )
-              .trim();
-
-          const cleanQualification =
-            qualification
-              ?.toString()
-              .trim()
-              .toLowerCase();
-
-          if (
-            !targetPlayerId ||
-            !question ||
-            ![
-              'correcta',
-              'repetida',
-              'mal'
-            ].includes(
-              cleanQualification
-            )
-          ) {
-            continue;
-          }
-
-          // ----------------------------------------------------
-          // VOTO INDIVIDUAL
-          // ----------------------------------------------------
-
-          allVotes.push({
-            voter_player_id:
-              voterPlayerId,
-
-            player_id:
-              targetPlayerId,
-
-            question:
-              question,
-
-            qualification:
-              cleanQualification
-          });
-        }
-      }
-
-      // --------------------------------------------------------
-      // LOG
-      // --------------------------------------------------------
-
-      console.log('');
-      console.log(
-        '================================'
-      );
-      console.log(
-        'RESULTADOS DE VOTACIÓN'
-      );
-      console.log(
-        '================================'
-      );
-      console.log(
-        'SALA:',
-        code
-      );
-      console.log(
-        'RONDA:',
-        roundNumber
-      );
-      console.log(
-        'JUGADORES QUE VOTARON:',
-        votesResult.rows.length
-      );
-      console.log(
-        'TOTAL VOTOS INDIVIDUALES:',
-        allVotes.length
-      );
-      console.log(
-        '================================'
-      );
-      console.log('');
-
-      return res.status(200).json({
-        success: true,
-
-        room_code:
-          code,
-
-        round:
-          roundNumber,
-
-        voters_count:
-          votesResult.rows.length,
-
-        votes:
-          allVotes
-      });
-
-    } catch (error) {
-      console.error(
-        'ERROR OBTENIENDO RESULTADOS DE VOTACIÓN:',
-        error
-      );
-
-      return res.status(500).json({
-        success: false,
-        message:
-          'Error al obtener los resultados de votación.',
         error:
           error.message
       });
